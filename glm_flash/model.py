@@ -9,6 +9,8 @@ NUM_HEADS = 4
 NUM_LAYERS = 4
 NUM_EXPERTS = 4
 
+NUM_STREAMS = 2
+
 
 class ByteEmbedding(nn.Module):
     def __init__(self):
@@ -353,6 +355,43 @@ class MoE(nn.Module):
         return output
 
 
+class HyperConnection(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        self.mix = nn.Linear(
+            NUM_STREAMS,
+            NUM_STREAMS,
+            bias=False
+        )
+
+    def forward(self, streams):
+        # streams:
+        # [batch, streams, sequence, embedding]
+
+        batch_size, num_streams, seq_len, dim = (
+            streams.shape
+        )
+
+        x = streams.permute(
+            0,
+            2,
+            3,
+            1
+        )
+
+        x = self.mix(x)
+
+        x = x.permute(
+            0,
+            3,
+            1,
+            2
+        )
+
+        return x
+
+
 class TransformerBlock(nn.Module):
     def __init__(self):
         super().__init__()
@@ -371,24 +410,46 @@ class TransformerBlock(nn.Module):
 
         self.moe = MoE()
 
-    def forward(self, x):
-        normalized = self.attention_norm(x)
+        self.hyperconnection = HyperConnection()
 
-        full_output = self.full_attention(
-            normalized
+    def forward(self, streams):
+
+        mixed = self.hyperconnection(
+            streams
         )
 
-        linear_output = self.linear_attention(
-            normalized
+        updated_streams = []
+
+        for i in range(NUM_STREAMS):
+
+            x = mixed[:, i]
+
+            normalized = self.attention_norm(x)
+
+            full_output = self.full_attention(
+                normalized
+            )
+
+            linear_output = self.linear_attention(
+                normalized
+            )
+
+            x = (
+                x
+                + full_output
+                + linear_output
+            )
+
+            x = x + self.moe(
+                self.mlp_norm(x)
+            )
+
+            updated_streams.append(x)
+
+        return torch.stack(
+            updated_streams,
+            dim=1
         )
-
-        x = x + full_output + linear_output
-
-        x = x + self.moe(
-            self.mlp_norm(x)
-        )
-
-        return x
 
 
 class Transformer(nn.Module):
@@ -409,8 +470,19 @@ class Transformer(nn.Module):
     def forward(self, tokens):
         x = self.embedding(tokens)
 
+        # Create multiple residual streams.
+        streams = x.unsqueeze(1).expand(
+            -1,
+            NUM_STREAMS,
+            -1,
+            -1
+        ).contiguous()
+
         for block in self.blocks:
-            x = block(x)
+            streams = block(streams)
+
+        # Combine streams.
+        x = streams.mean(dim=1)
 
         return self.final_norm(x)
 
@@ -453,4 +525,6 @@ if __name__ == "__main__":
     print("Logits shape:", logits.shape)
     print("Vocabulary size:", VOCAB_SIZE)
     print("Number of experts:", NUM_EXPERTS)
+    print("Number of residual streams:", NUM_STREAMS)
     print("Hybrid attention: enabled")
+    print("Hyperconnections: enabled")
