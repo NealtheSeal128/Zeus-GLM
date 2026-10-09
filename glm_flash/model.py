@@ -269,7 +269,7 @@ class LinearAttention(nn.Module):
             output = numerator / denominator
 
             outputs.append(output)
-
+ 
         output = torch.stack(
             outputs,
             dim=1
